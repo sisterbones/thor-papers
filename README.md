@@ -10,6 +10,12 @@ Most of this is written in LaTeX, intended to be compiled with LuaLaTeX. The bac
 
 Content and images is (c) 2025 Eoghan Ó Bogail unless otherwise specified.
 
+## Contents
+
+1. [Top][#thor]
+1. [Contents](#contents)
+1. [BT Young Scientist 2025](#bt-young-scientist-2025)
+
 ## BT Young Scientist 2025
 ### Project Booklet
 [![Project Booklet](./BT%20Young%20Scientist%202025/booklet/booklet.png)](./BT%20Young%20Scientist%202025/booklet/booklet.pdf)
