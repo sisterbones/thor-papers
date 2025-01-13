@@ -1,0 +1,322 @@
+\chapter{The System}
+
+\section{Hubs and Nodes}
+THOR operates on a server-client model, with the server being the Hub and the clients being the various Nodes. The Nodes connect to the Hub over a local network. Foe example, in THOR the lightning sensor is separated from the Hub into a separate Node. This allows for more flexibility, as now the lightning sensor isn't tethered to the Hub is running on. 
+
+Nodes connect to the hub over the network, but in the future I would like to add fallback Wi-Fi and Bluetooth Low Energy connections to keep the system robust.
+
+\section{THOR Hub}
+The THOR hub is the central server that the nodes and receivers connect to. It consists of three separate programs: a Python web app using Flask with a Socket.IO server, an MQTT to Socket.IO bridge, and a UDP auto-discovery server. The Flask app is able to run without MQTT support, which makes it easier to update when not connected to a network. 
+
+The hub receives and distributes data using Socket.IO, which is a low-latency communication protocol that mainly uses WebSockets. I picked Socket.IO because it is simple to implement on both the client and it handles reconnections automatically. The MQTT bridge allows the hub to receive alerts from Internet of Things devices.
+
+\subsection{Receiving Lightning Alerts}
+\label{chap:lightningalerts}
+
+After the lightning sensor sends its data (see \ref{chap:lightningsensor}), the Hub must handle this data. To make it easier to add new types of alerts in the future, I created a class called \texttt{Alert} to hold the common things an alert needs, like time, source, severity, id, and so on.
+
+I then derived a class from that called \texttt{LightningAlert}, which takes in how far away the lightning is and sets all the other parameters automatically. The hub then checks the database to see if there's already an active lightning alert, and if it is it checks if the new alert is closer than the older ones. If so, or if there aren't any active lighting alerts, it adds the alert to the database and publishes the alert to any nodes listening for alerts.
+
+I also created a class called \texttt{InfoAlert}, which allows me to make alerts that display as just informational rather than an actual alert. This is useful because the lightning sensor informs about too much noise, so I can use \texttt{InfoAlert} to inform the user about it without needing to send a notification.
+
+\begin{figure}[h]
+	\includegraphics[width=\linewidth]{Too much noise}
+	\label{fig:toomuchnoise}
+	\caption{An example of \texttt{InfoAlert} in practice}
+\end{figure}
+
+\subsection{Getting Data from External Providers}
+THOR supports getting weather and alert data from various sources that are external from the system. It could just be a weather station locally, or a source from the Internet. I have implemented two such sources: weather forecasts provided by MET Norway, and weather warnings from Met Éireann.
+
+To do this, I first created a class, named \texttt{WeatherProvider}, to represent a generic weather provider, which outlines how it should return weather information. This class doesn't actually fetch any data though, so another class \texttt{CachingWeatherProvider} handles fetching and caching data from weather providers. It is good practice to cache data like this, as it avoids hammering the APIs with requests. It also includes a \texttt{User-Agent} header, not only because its good practice, but MET Norway requires it for the Locationforecast API they provide\cite{metnofaq}.
+
+\begin{lstlisting}
+	class CachingWeatherProvider(WeatherProvider):
+		def __init__(self):
+			self.last_fetched_time = 0
+			self.seconds_to_live = 6000  # 10 minutes
+			self.cached_response = None
+			self.user_agent = "Thor Lightning Detection & Alert System (in development) https://github.com/sisterbones/thor"
+			self.query = {}
+		
+		def fetch(self) -> dict:
+			if not has_internet_connection(): # Helper function to check if there's internet
+				return self.cached_response
+			if time.time() <= self.last_fetched_time + self.seconds_to_live and self.cached_response: # Check if cache has expired
+				log.debug("Serving cache")
+				return self.cached_response
+			try:
+				data_request = requests.get(
+				self.base_url,
+				self.query,
+				timeout=(1, 10),
+				headers={
+					"User-Agent": self.user_agent
+				})
+			except (requests.exceptions.ConnectionError, requests.exceptions.ReadTimeout):
+				log.critical(f"Couldnt connect to {self.base_url}.")
+				return self.cached_response
+			self.cached_response = data_request
+			self.last_fetched_time = time.time()
+			return data_request
+\end{lstlisting}
+
+For the MET Norway Locationforecast API, I simply set the \texttt{base\_url} parameter to the URL of the API and passed in the latitude and longitude as query parameters. It then takes the latest forecast (which would be the one for the current hour) and gets the temperature and current weather symbol (intended for showing an icon next to the weather information on Yr.no, which is MET Norway's weather forecast website), and maps the weather symbol to an icon in the Font Awesome Free set and a headline summarizing the weather, before returning the data.
+
+Met Éireann Weather Warnings use the \texttt{Alert} class referenced in \textit{\nameref{chap:lightningalerts} (\ref{chap:lightningalerts})}. I created a class called \texttt{MetEireannWeatherWarning} which takes data from Met Éireann's Open Data website\footnote{Annoyingly, the endpoint for getting weather warnings as a JSON file is broken. For example, the specifications for the JSON feed says that \texttt{type} should be something like \texttt{Rain} or \texttt{Wind},\cite{metwwspecs} but in practice it is actually something like \texttt{orange; Severe}, which is data I can already determine from other fields in the JSON object. The data I want, which is the type of alert, cannot be parsed without manipulating the headline, because of which some of the code I wrote for the display node that depends on what the specs say is broken (see \autoref{fig:dnode2}). On top of that, the JSON feed doesn't include line breaks for the description for some reason. In the future, it would probably be better to use their RSS feed.}. This allows me to publish the weather warnings like lightning alerts, and store them in the same database table.
+
+\subsection{Web Dashboard}
+To allow for easy configuration of THOR, I created a web dashboard for it (it is a Flask app after all). The dashboard shows current alerts, the weather and basic configuration options (see \autoref{fig:dash}).
+
+\begin{figure}[h]
+	\centering
+	\includegraphics[width=0.8\linewidth]{THOR Dashboard}
+	\caption{A screenshot showing the THOR Dashboard.}
+	\label{fig:dash}
+\end{figure}
+
+To speed up the UI creation process, I used Bootstrap as the UI framework. Bootstrap allows you to quickly make fluid sites with a consistent design, and it has plenty of resources online, so it was easy to get the hang of. The UI is rendered mostly server-side using Jinja templates, but there is some JavaScript being used for the "Current Alerts" and Weather cards. 
+
+The JavaScript simply connects to the Socket.IO server to receive updates about the weather and alerts, and rebuilds the alert list. 
+
+The dashboard also allows you to configure some simple options, like the location to use for Providers and which providers the THOR should use. Aside from that, there is not much else that it does at the moment.
+
+\subsection[Autodiscovery \& Registration]{UDP Autodiscovery \& Node Registration}
+\label{chap:autodiscovery}
+The Hub also has a second, optional script to be run alongside the main Flask app for the Hub. This allows nodes to find the Hub's IP address without needing to be told what it is, which is useful if the Hub is using DHCP to get its IP address.
+
+The autodiscovery script implements the system laid out in \autoref{chap:system:autodiscovery} (\nameref{chap:system:autodiscovery}) using the built-in \texttt{socket} module in Python. It listens for UDP packets on port 51366 and if the packet starts with \texttt{thor\_node\_broadcast} it will respond with the sender's IP address and the port the Hub is running on.
+
+\begin{lstlisting}
+	# Logging code has been removed. Based on https://github.com/jholtmann/ip_discovery
+	import socket
+	def discovery_loop():
+		sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		server_address = ('', environ.get('NODE_DISCOVERY_PORT', 51366))
+		sock.bind(server_address)
+		while True:
+			data, address = sock.recvfrom(4096)
+			data = str(data.decode('UTF-8'))
+			if data.startswith('thor_node_broadcast'):
+				response = f'thor_server_response;your_ip:{address[0]};port:{environ.get("PORT", "8467")}'
+				sent = sock.sendto(response.encode(), address)
+\end{lstlisting}
+
+Once the node has the IP and port that THOR is running on, it may "register" with the Hub. It does this by making a GET request to \texttt{/api/node/register/:nodeId}. The Hub will respond with a payload like the following:
+
+\lstset{language=java}
+\begin{lstlisting}
+	{
+		"mqtt": {
+			"host": "192.168.0.1",
+			"password": "hunter2",
+			"port": 1883,
+			"username": "service"
+		},
+		"timestamp": 1735927224.037687 // in seconds
+	}
+\end{lstlisting}
+\lstset{language=python}
+
+The node can then use this to send and receive data using MQTT, as by default Mosquitto is configured to require authentication.
+
+Currently, registering doesn't do anything for the user, but at the moment the Hub does log which nodes have registered, and when they last registered, which could be used in the future.
+
+\subsection{System Requirements}
+
+The hub should be able to run fully on lower-powered hardware with a relatively recent Linux distribution, such as a Raspberry Pi or an old desktop, but it should work on anything running Python 3.10 or newer. It is should work entirely within your local network, and does not require internet access after the initial setup, however there are some optional features implemented that allows data from the internet to be used. 
+
+My deployment of the Hub runs on a Raspberry Pi 3B running Debian 12, using Gunicorn as the HTTP server and Mosquitto as the MQTT broker. I use Gunicorn and Mosquitto because they are the standard for their respective use-cases.
+
+\subsection{MQTT Bridge}
+\label{chap:mqtt}
+The MQTT module I use for Python, \texttt{paho.mqtt}, does not play nicely with the same application running in multiple processes, which is what I have configured in the Gunicorn config for the hub for performance reasons. For this reason, I spun handling MQTT off to its own script, like UDP Autodiscovery. The MQTT bridge isn't that complicated, it simply connects to both the Socket.IO server on the hub and the configured MQTT broker and passes messages between them. 
+
+\section{Lightning Node}
+\label{chap:lightningsensor}
+The lightning node is the second most important part of this system, behind the Hub, of course. It is a physical device, comprising of three main components: a DFRobot Gravity Lightning Sensor (containing an AMS AS3935 Franklin Lightning Sensor IC), an Arduino Uno and an Arduino Nano ESP32\footnote{This can be swapped out for any other MicroPython-compatible microcontroller with Wi-Fi.}. 
+
+I chose the DFRobot sensor because it was relatively inexpensive (about €20) and it claimed to detect lightning from up to 40km away and it supported I\textsuperscript{2}C. I did look into other systems, but most of the ones intended for embedding in a system uses the same lightning sensor anyway, and products aimed at consumers tended to be relatively expensive, such as a US-based company named TALOS selling exclusively lightning sensors, none of which cost less than US\$100, they probably used the same chip anyway\footnote{They claim the sensor can detect lightning from up to 25 miles away (about 40km).\cite{talos}, which is suspiciously similar to the AS3935.}, and I wouldn't be able to extract data from them anyway.
+
+The two microcontrollers serve two different purposes. The Arduino Uno interacts with the lightning sensor over the I\textsuperscript{2}C protocol, and listens for an interrupt signal from the sensor. When this happens, it reads the data from the sensor: it either interprets a lightning signal or the sensor reporting that there is too much noise.
+
+The TX and RX pins on the Uno are connected to the RX and TX pins on the Nano ESP32 respectively, allowing them to communicate over serial using UART. When the Uno needs to send data to the Nano, it will start the line with "\texttt{\~{}}", as the Uno sends some debug information over UART as well to help me troubleshoot the program.
+
+If there's lightning to report, the Uno will print the distance over UART, as well as the "energy" reported by the sensor. I'm not sure what it reports so I'm not logging it anywhere, but I'm leaving it in the Uno's code in case I want to use it in the future. 
+
+\begin{lstlisting}[language=c++]
+	uint8_t lightningDistKm = lightning0.getLightningDistKm();
+	uint32_t lightningEnergyVal = lightning0.getStrikeEnergyRaw();
+	
+	Serial.print("~LIGHTNING;DISTANCE:");
+	Serial.print(lightningDistKm);
+	Serial.print(";ENERGY:");
+	Serial.print(lightningEnergyVal);
+	Serial.println("");
+	
+	// Example output: ~LIGHTNING;DISTANCE:10;ENERGY:0
+\end{lstlisting}
+
+In the case of the noise being too high, it simply returns \texttt{\~{}NOISY}.
+
+The code running on the Nano is slightly more complicated, as it needs to listen to the UART pins and also send data over the network to the MQTT broker. Instead of using the Arduino language, it uses MicroPython, which is a port of Python on microcontrollers like this. Using MicroPython allows the code to easily be adapted to other microcontrollers.
+
+Once it gets the IP of the Hub and the MQTT credentials (see \autoref{chap:autodiscovery}) and initializes the MQTT client, the Nano goes into a loop where it will wait for a line of data over UART, attempt to decode the data and check if it starts with \texttt{\~{}}. It will then check if its a notice that the noise is too high, it will send that over MQTT and restart the loop. Otherwise, it parses the distance of the lightning and sends that over MQTT.
+
+You may have noticed that I'm using two similar microcontrollers, and that I could probably take the Arduino Uno out of this system entirely. Unfortunately, the DFRobot sensor refuses to connect over I\textsuperscript{2} to either the Arduino Nano or the Raspberry Pi Pico W I originally got for this project for some reason, but it would connect to the Uno, which is why the Nano receives the data over serial to then broadcast on MQTT.
+
+\subsection{Testing}
+When I was working on the lightning node, I tested the latency between Nano sending the lightning event and the Alerts App (\autoref{chap:alerts}), with the Nano on Wi-Fi, and an Ethernet connection between the router, the Hub and the computer running Alerts. Over six tests (see \autoref{table:latency}), I found the average latency was 739ms, which is more than low enough for an event like lightning. 
+
+\pgfplotstableread[row sep=\\, col sep=&] {
+		Test & Time \\
+		1 & 443 \\
+		2 & 685 \\
+		3 & 1177 \\
+		4 & 959 \\
+		5 & 520 \\
+		6 & 651 \\
+		Average & 739 \\
+	}\latencydata
+
+\begin{figure}[h]
+	\centering
+	\begin{subfigure}[h]{\linewidth}
+			\centering
+			\begin{tabular}[h]{c c}
+				\textit{\textbf{Test}} & \textbf{\textit{Time (ms)}} \\ [0.5ex]
+				1 & 443 \\
+				2 & 685 \\
+				3 & 1177 \\
+				4 & 959 \\
+				5 & 520 \\
+				6 & 651 \\
+				\textbf{Average} & \textbf{739} \\
+			\end{tabular}
+	\end{subfigure}
+	\begin{subfigure}[h]{\linewidth}
+		\centering
+		\begin{tikzpicture}
+			\begin{axis}[
+				ybar,
+				symbolic x coords={1, 2, 3, 4, 5, 6, Average},
+				xtick=data,
+				]
+				\addplot table[x=Test,y=Time]{\latencydata};
+			\end{axis}
+		\end{tikzpicture}
+	\end{subfigure}
+	\caption{Latency of alerts being received in milliseconds}
+	\label{table:latency}
+\end{figure}
+
+Due to circumstances outside of my control, I was unable to test the accuracy of the lightning sensor.
+
+\section{Alerts App}
+\label{chap:alerts}
+\begin{figure}[h]
+	\centering
+	\begin{subfigure}[b]{0.4\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{THOR Alerts alongside its system tray icon (KDE).png}
+		\subcaption{Linux using KDE Plasma}
+		\label{fig:alertskde1}
+	\end{subfigure}
+	\begin{subfigure}[b]{0.5\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{THOR Alerts alongside its Menu Bar icon (macOS).png}
+		\subcaption{macOS}
+		\label{fig:alertsmac1}
+	\end{subfigure}
+	
+	\caption{THOR Alerts running on various operating systems}
+\end{figure}
+
+The Alerts app is a receiver node that runs on a computer. I wrote it in Python as I was already using it for the other components of this project, and I used wxPython as the GUI framework. I decided to use wxPython for various reasons, the main one being that it makes it easy to write apps that act consistently across Windows, GNU/Linux (Figure \ref{fig:alertskde1}) and macOS (Figure \ref{fig:alertsmac1}) without needed to know the intricacies of a specific platform. It also makes system tray\footnote{Or in the case of macOS, the Menu Bar.} icons very easy to implement and change and I was already very mildly familiar with it before starting work on THOR.
+
+\begin{figure}
+	\centering
+	\begin{subfigure}[b]{0.45\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{An alert from THOR (KDE)}
+		\subcaption{KDE Plasma}
+		\label{fig:alertskde2}
+	\end{subfigure}
+	\begin{subfigure}[b]{0.52\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{An alert from THOR (macOS)}
+		\subcaption{macOS}
+		\label{fig:alertsmac2}
+	\end{subfigure}
+	
+	\caption{An notification showing an alert from THOR.}
+\end{figure}
+
+The Alerts app is very simple. It connects to THOR using Socket.IO and listens for the weather and alerts messages. When weather message arrive, it sets the system tray icon to an icon that matches the current weather. When alerts are sent out, it uses the \texttt{desktop-notifier} module to display a notification.
+
+\subsection{THORICONS}
+\label{chap:thoricons}
+Icon sets across various systems vary wildly, especially between Linux desktop environments. This means that I would have to maintain a list of mappings from the symbol names given by MET Norway not only to Font Awesome like I previously mentioned the Hub doing, but I would also have to maintain similar lists for Microsoft's Fluent icon set, Apple's SF Symbols and the Freedesktop icon specifications (Linux), which (and this can \textit{especially} be the case for Freedesktop-compliant icon sets) can vary wildly.
+
+\begin{figure}[h!]
+	\centering
+	\begin{subfigure}[t]{0.15\linewidth}
+		\centering
+		\includegraphics[height=0.085\textheight]{thoricons/sun@4x.png}
+		\subcaption{Sunny}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/cloud-rain@4x.png}
+		\subcaption{Raining}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/cloud-sleet@4x.png}
+		\subcaption{Sleet}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/sun-cloud-rain-lightning@4x.png}
+		\subcaption{Thunderstorms (Day)}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/moon-cloud@4x.png}
+		\subcaption{Cloudy (Night)}
+	\end{subfigure}
+	\caption{Examples of icons in the THORICON set.}
+	\label{fig:thoricons}
+\end{figure}
+
+For that reason I decided to create a set of weather icons for THOR, as I am experienced in making simple pixel art drawings. The icons are made of various "parts", which are then merged into various icons by a Python script. THORICON names follow a naming convention of \texttt{part1-part2-part3}, which tells the script how to generate the icon. For example, when given the icon \texttt{sun-cloud-rain-lightning}, the script will paste \texttt{sun.png} onto the image, and then \texttt{cloud.png}, and so on until it has pasted all the parts in the image. It then saves the icon to \texttt{sun-cloud-rain-lightning.png}. I didn't have time to create icons for every symbol name MET Norway returns in their API, but thanks to how I generate the icons adding new icons is quick and painless.
+
+To allow users to choose what icons they prefer on their system, THOR Alerts has a toggle in its preferences to switch between the Freedesktop and THORICON set on Linux. In the future I wish to add support for Mac and Windows icon sets directly, but I use Linux on my main computer so this is difficult to test.
+
+\section{Display Node}
+\begin{figure}[h]
+	\centering
+	\begin{subfigure}[t]{0.4\linewidth}
+		\includegraphics[width=\linewidth]{display node a-1}
+		\caption{No alerts}
+		\label{fig:dnode1}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.4\linewidth}
+		\includegraphics[width=\linewidth]{display node a-3}
+		\caption{A lightning alert on the node}
+		\label{fig:dnode3}
+	\end{subfigure}
+	\begin{subfigure}[t]{0.4\linewidth}
+		\includegraphics[width=\linewidth]{display node a-2}
+		\caption{Bugged weather warnings from Met Éireann}
+		\label{fig:dnode2}
+	\end{subfigure}
+	\caption{Pictures of the display node}
+	\label{fig:dnode}
+\end{figure}
+
+The "display node" is another receiver node, but this time as a physical device using MQTT. It is a Raspberry Pi Zero 2 W\footnote{Though the code and other hardware might work with the original Zero W} with a red/black/white Pimoroni Inky pHAT e-Paper display. It is also running a Python script, using the \texttt{pillow} image generation library to generate images to show on the pHAT.
+
+I had to create an image rendering library using \texttt{pillow} because I found myself repeating the same code for drawing text, icons, etc. The script should work with all Inky models, even those with larger screen sizes, because positions and sizes are relative to the screen size. The script is designed for 3-colour models (red, black and white in this case) but it should work with the Inky Impression, which has 7 colours.
+
+This node can fit up to two alerts on screen (see \autoref{fig:dnode2}) but other screens can fit more alerts. If an alert is severe at all, like the Yellow warnings are in my image, the node can set the colour to something like red to show severity. More severe alerts, like Orange or Red weather warnings, will show a fully red background instead of just the outline. 
+
+The main advantage of e-Paper is the low power usage. e-Paper requires very little energy, only using energy when it needs to change the content on screen\cite{reddit} and using no energy when it doesn't, meaning that the image will stay even if there's no power to the screen at all. It does have a couple of drawbacks: the screen can take time to refresh (the Inky model I'm using takes about 15 seconds to refresh, though apparently the black-and-white model takes about 2 seconds\cite{pimoroni}) and colours don't look that great on them yet.
+
+Unfortunately, I didn't have time to 3D print a case for the display node, nor did I have time to make the display node play audio to go with incoming alerts. These are things I would like to look into in the future.

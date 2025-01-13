@@ -1,0 +1,170 @@
+
+\documentclass{report}
+
+\usepackage{fontspec}
+\usepackage{textcomp}
+\usepackage{graphicx}
+\usepackage{fancyhdr}
+\usepackage{tocbibind}
+\usepackage{subcaption}
+\usepackage[backend=biber]{biblatex}
+\usepackage{listings}
+\usepackage{pgfplots}
+\usepackage{color}
+\usepackage[hidelinks]{hyperref}
+
+\pagestyle{fancy}
+\fancypagestyle{header}
+
+\setmainfont{IBM Plex Sans}
+\setsansfont{IBM Plex Sans}
+\setmonofont{IBM Plex Mono}
+
+\graphicspath{{Images/}}
+
+\definecolor{dkgreen}{rgb}{0,0.6,0}
+\definecolor{gray}{rgb}{0.5,0.5,0.5}
+\definecolor{mauve}{rgb}{0.58,0,0.82}
+
+\lstset{frame=tb,
+	language=Python,
+	aboveskip=3mm,
+	belowskip=3mm,
+	showstringspaces=false,
+	columns=flexible,
+	basicstyle={\small\ttfamily},
+	numbers=none,
+	numberstyle=\tiny\color{gray},
+	keywordstyle=\color{blue},
+	commentstyle=\color{dkgreen},
+	stringstyle=\color{mauve},
+	breaklines=true,
+	breakatwhitespace=true,
+	tabsize=3
+}
+
+\addbibresource{sources.bib}
+
+\title{THOR: Lightning Detection \& Alert System}
+\author{Eoghan Ó Bogail}
+\date{January 8, 2024}
+
+\begin{document}
+	\pagenumbering{gobble}
+	
+	\begin{center}
+		\begin{huge}
+			\textbf{THOR: Lightning Detection {\&} Alert System}
+		\end{huge}
+		
+		\medspace
+		
+		\begin{Large}
+			Eoghan Ó Bogail
+			
+			\medspace
+		\end{Large}
+		
+		\includegraphics[width=40mm]{logo.png}
+		
+		Stand number: 4201
+		
+		Pobalscoil Inbhear Scéine
+		
+		\begin{small}
+			\textit{Project Book}
+		\end{small}
+	\end{center}
+	
+	\thispagestyle{empty}
+	
+	\newpage\mbox{}
+	\pagenumbering{arabic}
+	\thispagestyle{empty}
+	
+	\newpage\section*{Comments}
+	\thispagestyle{empty}
+	\addcontentsline{toc}{chapter}{Comments}
+	
+	\chapter*{Abstract}
+	\addcontentsline{toc}{chapter}{Abstract}
+	This book showcases a lightning detection and alert system I have been developing since September 2024 called THOR. Rather than being contained in a single unit, different tasks are handled by different devices, which all communicate with a central server, allowing for easy modification of the system. 
+	
+	THOR's central server (the Hub) is designed to be run on older and lower-powered hardware, to allow it to run on devices like a Raspberry Pi or an old desktop, which is helped in part by the Hub not needing to detect anything itself. Sensors (Provider Nodes) are separate devices, allowing for easy modification of just the sensors without needing to change anything on the server. 
+	
+	The lightning sensor itself is a DFRobot Gravity Lightning Sensor (which uses an AMS AMS AS3935 Franklin Lightning Sensor IC and an antenna), which can detect lightning from up to 40km away. Due to some issues getting the sensor to communicate with an Arduino Nano ESP32 over I\textsuperscript{2}C, I am using an Arduino Uno to communicate with it instead, and telling the Nano about it over a UART serial connection, before it then tells the Hub about it over the MQTT protocol. In my testing, the average time between the Nano sending an alert and my computer receiving it was 739 milliseconds (see \autoref{table:latency})
+	
+	Alerts from THOR can currently be received in two ways: a "display node" and a desktop app. The display node is a Raspberry Pi Zero 2 W connected to an e-Paper display that shows the current alerts. The desktop app, which works on Linux, macOS and Windows, runs in the background, waiting for an alert, and when there is one it notifies the user. Because alerts can be received over both the MQTT and Socket.IO protocol, creating other methods to receive alerts, like a mobile or smart watch app, should be fairly simple.
+	
+	In the future, I would like THOR to support more kinds of alerts, like earthquake early warnings or low air quality. For this reason, I made THOR open source to promote developing more kinds of alerts and adding support for more sensors. While THOR can work fully offline, I have already made it possible to receive weather updates from MET Norway and weather warnings from Met Éireann.
+	
+	\tableofcontents
+	
+	\chapter{Introduction}
+	I live in rural Ireland, which means that I am no stranger to power cuts. A combination of wind and lightning during thunderstorms often leads to a power line or a tree falling, leaving my house without any power. These power cuts can cause small power surges to occur, which most devices aren't designed to deal with and will eventually stop working over time if the surges keep happening. If lightning strikes the house directly, say though a satellite dish, the surge would be in the millions of volts, which would absolutely kill the devices that are plugged in\cite{noaafaq}.
+	
+	All of this means it is important to know if lightning is approaching. One of the simplest ways of knowing that lightning is nearby is by looking for the flash and listening for the thunder. This isn't very useful to me though, as I may not notice the flash and I tend to spend a lot of my time using a computer listening to YouTube or music, and I often don't check the weather forecast, so I often miss these cues.
+	
+	Experiences like this got me thinking: what if I could get an alert on my computer when lightning strikes? Would there be any other use cases for such a system? Would I know about the lightning before I can hear the thunder?
+	
+	And so I set out to make this system, with the goals of sensing lightning, processing that alert, and sending that alert out to various devices.
+	
+		\section{Definitions}
+	
+	Before continuing I would like to define some of the terms and acronyms I will be using in this booklet.
+	
+	\begin{description}
+		\item[Hub] refers to both the main program controlling THOR and the hardware it is running on.
+		\subitem You may see \textbf{Hub server} or just \textbf{server} used to refer to the hardware THOR is running on.
+		\subitem You May also see \textbf{Hub software} used to refer to the program running on the server.
+		
+		\item[Node] refers to hardware or software that directly gives THOR data or retrieves data from THOR.
+		\subitem  Hardware or software that retrieves data from THOR are referred to as "receiver nodes"
+		\subitem Hardware or software that supplies data to THOR is referred to as "provider nodes"
+		
+		\item[Provider] refers to an external source of data from outside of the THOR system, such as from a weather station or the Internet. These are fetched by the \textbf{Hub}.
+		
+		\item[NOAA] stands for National Oceanic and Atmospheric Assosication, and is a part of the US Government.
+		
+		\item[MQTT] is a protocol for two computers to send data to each other, designed to use little bandwidth and allow
+		
+		\item[DHCP] stands for Dynamic Host Configuration Protocol. It is a protocol for devices on a network to get automatically assigned an IP address instead of it being manually assigned. Unless you've  changed your local IP address, you're probably using it on your home Wi-Fi right now.
+		
+		\item[e-Paper] is also known as eInk.
+		
+		\item[TCP and UDP] are protocols for computers to communicate with each other over a network. TCP is a one-on-one connection, with both sides acknowledging each other's messages and acknowledgements to ensure both computers know if data arrived to the other computer. UDP, on the other hand, allows a computer to send or receive data packets to or from the entire network, but the sender has no way of knowing if the packet arrived by default.
+		
+		\item[JSON] is a data type similar to JavaScript objects/arrays or Python dicts/lists.
+		
+		\item[GUI] stands for "Graphical User Interface". 
+		
+		\item[I\textsuperscript{2}C] stands for Inter-Integrated Circuit. It is a communication method for integrated circuits to communicate with each other over a short distance.
+	\end{description}
+	
+	\section{How is Lighting Detected?}
+	There are several ways of detecting lightning, for example the NOAA and NASA have an instrument called the Geostationary Lightning Mapper on two of their satellites which optically detects flashes of lightning, \cite{noaa} however this would be inconvenient for home use. 
+	
+	Another way of detecting lightning involves detecting radio frequencies (RF). When lightning strikes, it sends out a pulse of electromagnetic energy, including the light we see as a flash\cite{met}. Networks such as ATDNET, which was created by the Met Office in the UK and is accurate to less than 3km in western Europe, detect these pulses known as "sferics" in the frequency range of 10-14kHz (known as Very Low Frequency or VLF). It then uses triangulation to find the source of the sferic\cite{met}. Sferics can also be picked up on simple AM radios. The lightning sensor I am using in this system, the AS3935 Franklin Lightning Sensor IC, listens to a different frequency at around 500 kHz. \cite{as3935datasheet} Because this type of detection uses radio waves, detectors need to filter out interference from other devices, which may not be as big of a problem for ATDNET, but for something to be used at home its more of a concern.
+	
+	\section{Deciding on a Language}
+	I decided to use Python as the main language for this project, simply because I'm very familiar with it. I have been using Flask, a web app framework for Python, for several years at this point, and so using Python and Flask makes building the Hub very easy for me. I didn't really consider any other languages when building this project. Of course, there is some JavaScript in the Hub for client-side code execution, but the entire rest of the project uses Python.
+	
+	\section{Open Source}
+	I decided to make this project open source for a simple reason: I want to make it easy to extend THOR past just lightning. As I can't test various types of sensors myself,\footnote{I don't know how legal it would be to create an earthquake just to test a sensor.} I'd rather people were able to work out how to add their own sensors to the system. I also feel that the work I have done on this project is worth sharing, and I think the best way to do that it to make everything open for people to see it and learn from what I have done but also where I have gone wrong.
+	
+	I published my code as a Git repository at \underline{\href[]{https://github.com/sisterbones/thor}{https://github.com/sisterbones/thor}}
+	
+	\include{system.tex}
+	
+	\include{conclusion.tex}
+	
+	\printbibliography[heading=bibintoc, title={References}]
+	
+	\newpage
+	\begin{center}
+		100\% human-made. No Generative AI was knowingly used in the creation of this booklet or this project.
+	\end{center}
+	\pagenumbering{gobble}
+	\thispagestyle{empty}
+			
+\end{document}

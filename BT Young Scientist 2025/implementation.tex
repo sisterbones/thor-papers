@@ -1,0 +1,82 @@
+\chapter{Implementation}
+\section{THOR Hub}
+The THOR hub is the central server that the nodes and receivers connect to. It consists of three separate programs: a Python web app using Flask with a Socket.IO server, an MQTT to Socket.IO bridge, and a UDP auto-discovery server. The Flask app is able to run without MQTT support, which makes it easier to update when not connected to a network. 
+
+The hub receives and distributes data using the Socket.IO protocol, which is a low-latency communication protocol that mainly uses WebSockets. I picked Socket.IO because it is simple to implement on both the client and it handles reconnections automatically. The MQTT bridge allows the hub to receive alerts from Internet of Things devices.
+
+The hub should be able to run fully on lower-powered hardware with a relatively recent Linux distribution, such as a Raspberry Pi 3B+ running Debian 12 or an old desktop, but it does require Python 3.10. It is designed to work entirely within your local network, and does not require internet access after the initial setup, however there are some optional features implemented that allows data from the internet to be used.
+
+\section{Alerts App}
+
+\begin{figure}[h]
+	\centering
+	\begin{subfigure}[b]{0.4\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{THOR Alerts alongside its system tray icon (KDE).png}
+		\subcaption{Running on Linux (KDE)}
+		\label{fig:alertskde1}
+	\end{subfigure}
+	\begin{subfigure}[b]{0.5\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{THOR Alerts alongside its Menu Bar icon (macOS).png}
+		\subcaption{Running on macOS}
+		\label{fig:alertsmac1}
+	\end{subfigure}
+	
+	\caption{THOR Alerts running on various operating systems}
+\end{figure}
+
+The Alerts app is a receiver node that runs on a computer. I wrote it in Python as I was already using it for the other components of this project, and I used wxPython as the GUI framework. I decided to use wxPython for various reasons, the main one being that it makes it easy to write apps that act consistently across Windows, GNU/Linux (Figure \ref{fig:alertskde1) and macOS (Figure \ref{fig:alertsmac1}) without needed to know the intricacies of a specific platform. It also makes system tray\footnote{Or in the case of macOS, the Menu Bar.} icons very easy to implement and change and I was already very mildly familiar with it before starting work on THOR.
+
+\begin{figure}
+		\centering
+		\begin{subfigure}[b]{0.4\linewidth}
+			\centering
+			\includegraphics[width=\linewidth]{An alert from THOR (KDE)}
+			\subcaption{Running on Linux (KDE)}
+			\label{fig:alertskde2}
+		\end{subfigure}
+		\begin{subfigure}[b]{0.5\linewidth}
+			\centering
+			\includegraphics[width=\linewidth]{An alert from THOR (macOS)}
+			\subcaption{Running on macOS}
+			\label{fig:alertsmac2}
+		\end{subfigure}
+		
+		\caption{An notification showing an alert from THOR.}
+\end{figure}
+
+The Alerts app is very simple. It connects to THOR using Socket.IO and listens for the weather and alerts messages. When weather message arrive, it sets the system tray icon to an icon that matches the current weather. When alerts are sent out, it uses the \texttt{desktop-notifier} module to show a notification. The downsides of using \texttt{desktop-notifier} like this is that some Linux desktop environments don't support notifications and macOS won't send critical notifications (which bypass Do Not Disturb \textit{and} Silent Mode) without a special entitlement from Apple, which requires your app is signed by Apple using a paid Developer account. Currently, the only fallback notification type is for Windows 7 and 8.1 where it will use older "balloon" style notifications triggered through wxPython.
+
+\subsection{THORICONS}
+Icon sets across various systems vary wildly, especially between Linux desktop environments. This means that I would have to maintain a list of mappings from the symbol names given by MET Norway not only to Font Awesome like I previously mentioned the Hub doing, but I would also have to maintain similar lists for Microsoft's Fluent icon set, Apple's SF Symbols and the Freedesktop icon specifications (Linux), which (and this can \textit{especially} be the case for Freedesktop-compliant icon sets) can vary wildly.
+
+\begin{figure}[h!]
+	\centering
+	\begin{subfigure}[b]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/sun@4x.png}
+		\subcaption{Sunny}
+	\end{subfigure}
+		\begin{subfigure}[b]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/cloud-rain@4x.png}
+		\subcaption{Raining}
+	\end{subfigure}
+		\begin{subfigure}[b]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/cloud-sleet@4x.png}
+		\subcaption{Sleet}
+	\end{subfigure}
+		\begin{subfigure}[b]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/sun-cloud-rain-lightning@4x.png}
+		\subcaption{Thunderstorms (Day)}
+	\end{subfigure}
+		\begin{subfigure}[b]{0.15\linewidth}
+		\includegraphics[height=0.1\textheight]{thoricons/moon-cloud@4x.png}
+		\subcaption{Cloudy (Night)}
+	\end{subfigure}
+	\caption{Examples of icons in the THORICON set.}
+	\label{fig:thoricons}
+\end{figure}
+
+For that reason I decided to create a set of weather icons for THOR, as I am experienced in making simple pixel art drawings. The icons are made of various "parts", which are then merged into various icons by a Python script. THORICON names follow a naming convention of \texttt{part1-part2-part3}, which tells the script how to generate the icon. For example, when given the icon \texttt{sun-cloud-rain-lightning}, the script will paste \texttt{sun.png} onto the image, and then \texttt{cloud.png}, and so on until it has pasted all the parts in the image. It then saves the icon to \texttt{sun-cloud-rain-lightning.png}. I didn't have time to create icons for every symbol name MET Norway returns in their API, but thanks to how I generate the icons adding new icons is quick and painless.
+
+To allow users to choose what icons they prefer on their system, THOR Alerts has a toggle in its preferences to switch between the Freedesktop and THORICON set on Linux. In the future I wish to add support for Mac and Windows icon sets directly, but I use Linux on my main computer so this is difficult to test.
